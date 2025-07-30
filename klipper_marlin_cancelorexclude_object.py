@@ -1,0 +1,170 @@
+# MarlinCancelObject script - Inject M486 G-code commands for Marlin's Cancel Object support
+# Extended to also insert Klipper-compatible cancel_object tags and a safer Z-hop fix
+# that preserves X/Y by freezing them to the current position during vertical lifts.
+# Runs with the PostProcessingPlugin which is released under the terms of the AGPLv3 or higher.
+# Original by Aapo Saaristo (https://github.com/shinmai/cura-M486)
+# Modifications for Klipper/Fluidd and Z-hop XY-freeze by ChatGPT (2025-07-30)
+
+from ..Script import Script
+
+class MarlinCancelObject(Script):
+    def __init__(self):
+        super().__init__()
+
+    def getSettingDataString(self):
+        # Keep original setting key for the experimental fix,
+        # but implement it as an XY-freeze instead of stripping X/Y.
+        return """{
+          "name": "Marlin M486 - Cancel Object support (Klipper+Z-hop fix)",
+          "key": "MarlinCancelObject",
+          "metadata": {},
+          "version": 2,
+          "settings": {
+            "nzf":
+            {
+              "label": "Experimental z-hop fix",
+              "description": "Freeze X & Y on the first Z-hop move after NONMESH to avoid slow/diagonal moves across the bed after cancelled objects. Preview G-code before printing.",
+              "type": "bool",
+              "default_value": false
+            }
+          }
+        }"""
+
+    def execute(self, data):
+        nonmesh_zhop_fix = self.getSettingValueByKey("nzf")
+
+        meshes = []                 # list of unique mesh names (order defines indices for S# / object IDs)
+        active_object = None        # current mesh name we are inside for Klipper tags
+        pending_zhop_fix = False    # set True when we enter NONMESH so we can fix the *next* move line
+        last_x = None               # last known X coordinate (float)
+        last_y = None               # last known Y coordinate (float)
+
+        def parse_coord(token, prefix):
+            # returns float if token like 'X12.34', else None
+            if token.startswith(prefix):
+                try:
+                    return float(token[len(prefix):])
+                except ValueError:
+                    return None
+            return None
+
+        def build_xyfrozen_zhop(line, last_x_val, last_y_val):
+            # If line is a rapid/feed move (G0/G1) containing Z,
+            # rebuild it as G0 X<last_x> Y<last_y> Z<z> [F...] to eliminate any XY travel.
+            if not (line.startswith("G0") or line.startswith("G1")):
+                return line
+
+            parts = line.strip().split()
+            if len(parts) == 0:
+                return line
+
+            z_token = None
+            f_token = None
+            for p in parts[1:]:
+                if p.startswith("Z"):
+                    z_token = p
+                elif p.startswith("F"):
+                    f_token = p
+
+            if z_token is None:
+                # Not a Z-hop move, leave unchanged
+                return line
+            if last_x_val is None or last_y_val is None:
+                # We don't know current XY yet; safer to leave as-is
+                return line
+
+            # Format with 3 decimals (typical Cura output), but don't force if integers
+            x_str = f"X{last_x_val:.3f}".rstrip('0').rstrip('.')
+            y_str = f"Y{last_y_val:.3f}".rstrip('0').rstrip('.')
+
+            new_cmd = f"G0 {x_str} {y_str} {z_token}"
+            if f_token is not None:
+                new_cmd += f" {f_token}"
+            new_cmd += " ;Z-hop with XY frozen"
+
+            return new_cmd
+
+        # First pass: add M486 S#, Klipper start/end tags, and mark spots for Z-hop fix.
+        for index, layer in enumerate(data):
+            lines = data[index].split("\n")
+            new_lines = []
+
+            for lindex, raw_line in enumerate(lines):
+                line = raw_line
+
+                # If the previous line set a pending z-hop fix, apply it here.
+                if pending_zhop_fix and nonmesh_zhop_fix:
+                    fixed = build_xyfrozen_zhop(line, last_x, last_y)
+                    line = fixed
+                    # After we modify this line, clear the flag
+                    pending_zhop_fix = False
+
+                # Track last known X/Y (use the possibly-fixed line)
+                if line.startswith("G0") or line.startswith("G1"):
+                    parts = line.strip().split()
+                    for p in parts[1:]:
+                        x_val = parse_coord(p, "X")
+                        y_val = parse_coord(p, "Y")
+                        if x_val is not None:
+                            last_x = x_val
+                        if y_val is not None:
+                            last_y = y_val
+
+                # Handle MESH transitions and tagging
+                if ";MESH:" in line:
+                    meshname = line[6:].strip()
+                    # Determine index for M486 S#
+                    if meshname in meshes:
+                        idx = meshes.index(meshname)
+                    elif meshname != "NONMESH":
+                        meshes.append(meshname)
+                        idx = meshes.index(meshname)
+                    else:
+                        # NONMESH gets -1 (as in original script)
+                        idx = -1
+
+                    # Emit the original MESH line
+                    new_lines.append(line)
+                    # Emit the Marlin tag for compatibility
+                    new_lines.append(f"M486 S{idx} ;Marlin Cancel Object support")
+
+                    # Handle Klipper tags based on mesh state
+                    if meshname == "NONMESH":
+                        # We are leaving any active object
+                        if active_object is not None:
+                            new_lines.append("; cancel_object_end")
+                            active_object = None
+                        # Next movement line may be a Z-hop; freeze XY there
+                        pending_zhop_fix = True
+                    else:
+                        # Entering a mesh: if we were already in another object, close it
+                        if active_object is not None and active_object != meshname:
+                            new_lines.append("; cancel_object_end")
+                        # Open a (new) object region for Klipper
+                        new_lines.append(f"; cancel_object_start NAME={meshname}")
+                        active_object = meshname
+
+                    # Continue to next line
+                    continue
+
+                # Regular line (non-MESH) after any fixes/tracking
+                new_lines.append(line)
+
+            # If we end the layer while still inside an object, keep it open; it will be closed on NONMESH or object change later
+            data[index] = "\n".join(new_lines)
+
+        # Second pass: insert M486 T# (total object count) after LAYER_COUNT
+        for index, layer in enumerate(data):
+            lines = data[index].split("\n")
+            for lindex, line in enumerate(lines):
+                if ";LAYER_COUNT:" in line:
+                    lines[lindex] = line + f"\nM486 T{len([m for m in meshes if m != 'NONMESH'])} ;Marlin Cancel Object support"
+                    break
+            data[index] = "\n".join(lines)
+
+        # Finalization: if the very last layer ended while still inside an object (no NONMESH afterwards),
+        # append a closing Klipper tag to the end of the file to ensure proper closure.
+        if active_object is not None:
+            data[-1] = data[-1] + "\n; cancel_object_end"
+
+        return data
