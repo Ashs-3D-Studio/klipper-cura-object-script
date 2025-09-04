@@ -1,4 +1,4 @@
-# MarlinCancelObject script - Inject M486 G-code commands for Marlin's Cancel Object support
+# KlipperCancelExcludeObject script - Inject M486 G-code commands for Marlin's Cancel Object support
 # Extended to also insert Klipper-compatible cancel_object tags and a safer Z-hop fix
 # that preserves X/Y by freezing them to the current position during vertical lifts.
 # Runs with the PostProcessingPlugin which is released under the terms of the AGPLv3 or higher.
@@ -7,7 +7,7 @@
 
 from ..Script import Script
 
-class MarlinCancelObject(Script):
+class KlipperCancelExcludeObject(Script):
     def __init__(self):
         super().__init__()
 
@@ -16,7 +16,7 @@ class MarlinCancelObject(Script):
         # but implement it as an XY-freeze instead of stripping X/Y.
         return """{
           "name": "Marlin M486 - Cancel Object support (Klipper+Z-hop fix)",
-          "key": "MarlinCancelObject",
+          "key": "KlipperCancelExcludeObject",
           "metadata": {},
           "version": 2,
           "settings": {
