@@ -25,7 +25,7 @@ Includes an improved Z-hop fix that **preserves the X and Y coordinates** by set
   (Typically: `%APPDATA%\cura\<your-version>\scripts`)
 
 ### Step 2 – Add the Script
-- Paste `klipper_marlin_cancelorexclude_object.py` into the `scripts` folder
+- Paste `KlipperMarlinCancelExcludeObject.py` into the `scripts` folder
 - **Right-click the file > Properties > Unblock** (important!)
 
 ### Step 3 – Restart Cura
@@ -58,8 +58,8 @@ enable_object_processing: True
 ```
 
 ### 🔁 Important:
-If you uploaded your G-code **before enabling `enable_object_processing`**, you must re-upload it to allow Moonraker to reprocess the object list.
-
+- If you uploaded your G-code **before enabling `enable_object_processing`**, you must re-upload it to allow Moonraker to reprocess the object list.
+- The scripts filename **must match** the scripts classname for it to become visible in Cura. The classname is currently `KlipperMarlinCancelExcludeObject`.
 ---
 
 ## 🖨️ Printing & Cancelling Objects
